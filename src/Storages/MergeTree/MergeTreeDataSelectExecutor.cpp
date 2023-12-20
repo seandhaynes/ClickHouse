@@ -1,6 +1,7 @@
 #include <boost/rational.hpp>   /// For calculations related to sampling coefficients.
 #include <optional>
 #include <unordered_set>
+#include <chrono>
 
 #include <Storages/MergeTree/MergeTreeDataSelectExecutor.h>
 #include <Storages/MergeTree/MergeTreeReadPool.h>
@@ -746,8 +747,18 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
                 CurrentMetrics::MergeTreeDataSelectExecutorThreadsScheduled,
                 num_threads);
 
+            SCOPE_EXIT({ pool.wait(); });
+
+            /// Instances of ThreadPool "borrow" threads from the global thread pool.
+            /// We intentionally use scheduleOrThrow here to avoid a deadlock.
+            /// For example, queries can already be running with threads from the
+            /// global pool, and if we saturate max_thread_pool_size whilst requesting
+            /// more in this loop, queries will block infinitely.
+            /// So we wait until lock_acquire_timeout, and then raise an exception.
+            ssize_t priority = 0;
+            const std::chrono::microseconds lock_acquire_timeout_microseconds = std::chrono::seconds{context->getSettingsRef().lock_acquire_timeout};
             for (size_t part_index = 0; part_index < parts.size(); ++part_index)
-                pool.scheduleOrThrowOnError([&, part_index, thread_group = CurrentThread::getGroup()]
+                pool.scheduleOrThrow([&, part_index, thread_group = CurrentThread::getGroup()]
                 {
                     SCOPE_EXIT_SAFE(
                         if (thread_group)
@@ -757,9 +768,7 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByPrimaryKeyAndSkipInd
                         CurrentThread::attachToGroupIfDetached(thread_group);
 
                     process_part(part_index);
-                });
-
-            pool.wait();
+                }, priority, lock_acquire_timeout_microseconds.count());
         }
 
         /// Skip empty ranges.

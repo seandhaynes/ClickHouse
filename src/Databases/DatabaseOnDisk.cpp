@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include <Databases/DatabaseOnDisk.h>
 
 #include <IO/ReadBufferFromFile.h>
@@ -644,19 +646,24 @@ void DatabaseOnDisk::iterateMetadataFiles(ContextPtr local_context, const Iterat
             throw Exception(ErrorCodes::INCORRECT_FILE_NAME, "Incorrect file extension: {} in metadata directory {}", file_name, getMetadataPath());
     }
 
+    /// Don't wait forever for threads from the Global thread pool. Otherwise, ClickHouse can enter a deadlocked state
+    /// where it blocks infinitely on startup waiting for threads.
+    const std::chrono::microseconds lock_acquire_timeout_microseconds = std::chrono::seconds{getContext()->getSettingsRef().lock_acquire_timeout};
+
     /// Read and parse metadata in parallel
     ThreadPool pool(CurrentMetrics::DatabaseOnDiskThreads, CurrentMetrics::DatabaseOnDiskThreadsActive, CurrentMetrics::DatabaseOnDiskThreadsScheduled);
+    SCOPE_EXIT({ pool.wait(); });
+
     for (const auto & file : metadata_files)
     {
-        pool.scheduleOrThrowOnError([&]()
+        pool.scheduleOrThrow([&]()
         {
             if (file.second)
                 process_metadata_file(file.first);
             else
                 process_tmp_drop_metadata_file(file.first);
-        });
+        }, 0 /* default priority */, lock_acquire_timeout_microseconds.count());
     }
-    pool.wait();
 }
 
 ASTPtr DatabaseOnDisk::parseQueryFromMetadata(
