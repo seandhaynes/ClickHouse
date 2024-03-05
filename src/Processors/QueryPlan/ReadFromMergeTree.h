@@ -127,7 +127,6 @@ public:
         bool has_exact_ranges = false;
 
         bool readFromProjection() const { return !parts_with_ranges.empty() && parts_with_ranges.front().data_part->isProjectionPart(); }
-        void checkLimits(const Settings & settings, const SelectQueryInfo & query_info_) const;
     };
 
     using AnalysisResultPtr = std::shared_ptr<AnalysisResult>;
